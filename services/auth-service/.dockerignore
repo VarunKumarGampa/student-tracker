@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+
+# Virtual environment — never copy this into the image
+# The image installs its own packages from requirements.txt
+venv/
+env/
+
+# Environment files — never put secrets in an image
+app/.env
+.env
+
+# Test and development files
+app/pytest.ini
+app/conftest.py
+app/.coverage
+.coverage
+
+# Version control
+.git/
+.gitignore
+
+# Docker itself
+Dockerfile
+docker-compose.yml
+.dockerignore
+
+# VS Code
+.vscode/

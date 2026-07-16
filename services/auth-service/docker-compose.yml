@@ -1,0 +1,66 @@
+version: "3.9"
+
+services:
+  db:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_DB: auth_db
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  web:
+    # Build the image from our Dockerfile
+    # context: . means "look for Dockerfile in this folder"
+    build:
+      context: .
+      dockerfile: Dockerfile
+
+    # What command to run — overrides the Dockerfile CMD
+    # We use runserver here for local dev (auto-reload on code changes)
+    # In production the Dockerfile CMD (Gunicorn) is used instead
+    command: >
+      sh -c "python manage.py migrate &&
+             python manage.py runserver 0.0.0.0:8000"
+
+    # Mount the app/ folder from your laptop into the container
+    # Why? So when you edit code in VS Code, the change
+    # is immediately reflected inside the container
+    # without rebuilding the image
+    volumes:
+      - ./app:/service
+
+    ports:
+      - "8000:8000"
+
+    # Environment variables passed into the container
+    # These override whatever is in .env
+    environment:
+      SECRET_KEY: dev-secret-key-change-this-in-production-123456
+      DEBUG: "True"
+      ALLOWED_HOSTS: localhost,127.0.0.1,0.0.0.0
+      DB_NAME: auth_db
+      DB_USER: postgres
+      DB_PASSWORD: postgres
+      # 'db' is the hostname — Docker Compose creates an internal
+      # network where each service is reachable by its name
+      DB_HOST: db
+      DB_PORT: "5432"
+
+    # Don't start web until db is healthy
+    # Without this, Django starts before Postgres is ready
+    # and crashes trying to connect
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  postgres_data:
