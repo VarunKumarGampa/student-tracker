@@ -1,0 +1,160 @@
+# Trigger — runs when auth-service code changes on main branch
+trigger:
+  branches:
+    include:
+      - main
+  paths:
+    include:
+      - services/auth-service/**
+
+variables:
+  - group: pipeline-secrets
+  - name: SERVICE_NAME
+    value: auth-service
+  - name: ACR_LOGIN_SERVER
+    value: varunstudentacr.azurecr.io
+  - name: IMAGE_NAME
+    value: varunstudentacr.azurecr.io/auth-service
+  - name: GITOPS_REPO
+    value: VarunKumarGampa/student-tracker-gitops
+  - name: PYTHON_VERSION
+    value: "3.12"
+
+stages:
+  # ── Stage 1: Test ─────────────────────────────────────
+  - stage: Test
+    displayName: "Test and Security Scan"
+    jobs:
+      - job: RunTests
+        displayName: "Lint, Test, SAST"
+        pool:
+          vmImage: ubuntu-latest
+
+        services:
+          postgres:
+            image: postgres:15-alpine
+            env:
+              POSTGRES_DB: auth_db
+              POSTGRES_USER: postgres
+              POSTGRES_PASSWORD: postgres
+            ports:
+              - 5432:5432
+            options: >-
+              --health-cmd pg_isready
+              --health-interval 10s
+              --health-timeout 5s
+              --health-retries 5
+
+        steps:
+          - checkout: self
+
+          - task: UsePythonVersion@0
+            inputs:
+              versionSpec: "$(PYTHON_VERSION)"
+            displayName: "Set up Python"
+
+          - script: |
+              cd services/auth-service
+              python -m pip install --upgrade pip
+              pip install -r requirements.txt
+              pip install pytest pytest-django pytest-cov flake8 bandit
+            displayName: "Install dependencies"
+
+          - script: |
+              cd services/auth-service/app
+              flake8 . --max-line-length=120 --exclude=migrations,venv
+            displayName: "Lint — flake8"
+
+          - script: |
+              cd services/auth-service/app
+              python -m pytest --cov=users --cov-report=xml --cov-fail-under=80
+            displayName: "Tests — pytest"
+            env:
+              SECRET_KEY: "ci-test-secret-key"
+              DEBUG: "True"
+              DB_NAME: "auth_db"
+              DB_USER: "postgres"
+              DB_PASSWORD: "postgres"
+              DB_HOST: "localhost"
+              DB_PORT: "5432"
+
+          - script: |
+              cd services/auth-service
+              bandit -r app/ -x app/users/migrations,app/users/tests.py \
+                --severity-level medium
+            displayName: "SAST — Bandit"
+
+  # ── Stage 2: Build and Push ───────────────────────────
+  - stage: Build
+    displayName: "Build, Scan and Push"
+    dependsOn: Test
+    condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+    jobs:
+      - job: BuildAndPush
+        displayName: "Build image, scan, push to ACR"
+        pool:
+          vmImage: ubuntu-latest
+
+        steps:
+          - checkout: self
+
+          - task: Docker@2
+            displayName: "Build Docker image"
+            inputs:
+              command: build
+              dockerfile: services/auth-service/Dockerfile
+              buildContext: services/auth-service
+              repository: $(IMAGE_NAME)
+              tags: |
+                $(Build.SourceVersion)
+                latest-main
+
+          - script: |
+              curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh \
+                | sh -s -- -b /usr/local/bin
+              trivy image \
+                --exit-code 1 \
+                --severity CRITICAL \
+                --no-progress \
+                $(IMAGE_NAME):$(Build.SourceVersion)
+            displayName: "Scan image — Trivy"
+
+          - task: Docker@2
+            displayName: "Push image to ACR"
+            inputs:
+              command: push
+              containerRegistry: acr-connection
+              repository: auth-service
+              tags: |
+                $(Build.SourceVersion)
+                latest-main
+
+  # ── Stage 3: Update GitOps repo ───────────────────────
+  - stage: UpdateGitOps
+    displayName: "Update GitOps repo"
+    dependsOn: Build
+    condition: succeeded()
+    jobs:
+      - job: UpdateImageTag
+        displayName: "Update image tag in values.yaml"
+        pool:
+          vmImage: ubuntu-latest
+
+        steps:
+          - script: |
+              sudo wget -qO /usr/local/bin/yq \
+                https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
+              sudo chmod +x /usr/local/bin/yq
+            displayName: "Install yq"
+
+          - script: |
+              git clone https://$(GITHUB_PAT)@github.com/$(GITOPS_REPO).git gitops
+              cd gitops
+              yq e '.image.tag = "$(Build.SourceVersion)"' \
+                -i apps/auth-service/values.yaml
+              git config user.email "pipeline@studenttracker.com"
+              git config user.name "Azure DevOps Pipeline"
+              git add apps/auth-service/values.yaml
+              git commit -m "ci: update auth-service to $(Build.SourceVersion)"
+              git push
+            displayName: "Update image tag and push"
